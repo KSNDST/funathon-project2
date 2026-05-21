@@ -33,9 +33,9 @@ In this notebook, we use the supervised approach: the model learns directly from
 %%| eval: true
 %%| output: true
 flowchart LR
-    A["Labelled data<br/>text + NAF code"] --> B["Split<br/>train / val / test"]
+    A["Labelled data<br/>text + NACE code"] --> B["Split<br/>train / val / test"]
     B --> C["WordPiece Tokenizer<br/>text → token IDs"]
-    C --> D["torchTextClassifiers<br/>token IDs → NAF code"]
+    C --> D["torchTextClassifiers<br/>token IDs → NACE code"]
     D --> E["Evaluation<br/>& explainability"]
 ```
 
@@ -61,6 +61,7 @@ uv sync
 
 This installs, among others, `torchTextClassifiers` — the INSEE library that provides the tokenizer, model, and training loop used throughout this notebook. Its full API documentation is available [here](https://inseefrlab.github.io/torchTextClassifiers/).
 
+
 **2. Understand what MLflow is and why we need it**
 
 In this notebook, we use MLflow in two ways:
@@ -76,12 +77,18 @@ Because the MLflow server is a remote, access-controlled service, you need to pr
 
 - `MLFLOW_TRACKING_URI`: the URL of the MLflow server (tells your code where to connect).
 - `MLFLOW_RUN_ID`: the identifier of the specific training run whose artefacts (pretrained model) you want to download.
+- `MLFLOW_TRACKING_USERNAME`
+- `MLFLOW_TRACKING_PASSWORD`
 
-These values must **not** be hardcoded in the notebook — storing credentials in source code is a security risk. Instead, create a file named `.env` at the root of the project and fill it in as follows:
+These values must **not** be hardcoded in the notebook — storing credentials in source code is a security risk.
+
+**Instead, create a file named `.env` at the root of the project and fill it in as follows:**
 
 ```
 MLFLOW_TRACKING_URI=<add the MLflow server URL>
 MLFLOW_RUN_ID=<add the run ID>
+MLFLOW_TRACKING_USERNAME=<add your username>
+MLFLOW_TRACKING_PASSWORD=<add your password>
 ```
 
 The notebook loads this file automatically at startup with `load_dotenv()`, making the values available as environment variables without ever appearing in the code.
@@ -90,8 +97,8 @@ The notebook loads this file automatically at startup with `load_dotenv()`, maki
 
 # Load the data
 
-The dataset consists of **synthetic labelled examples** generated for the NAF 2025 nomenclature.
-Each row contains a short text description (`label`) and the corresponding NAF code (`code`).
+The dataset consists of **synthetic labelled examples** generated for the NACE 2025 nomenclature.
+Each row contains a short text description (`label`) and the corresponding NACE code (`code`).
 
 ::: {.callout-tip collapse="false" icon=false}
 ## `<i class="bi bi-book"></i>`{=html} Exercice 1: Load the labelled dataset
@@ -140,9 +147,9 @@ print(f"Total rows: {len(df)}")
 ```
 
 
-## Question 3 — Count unique NAF codes
+## Question 3 — Count unique NACE codes
 
-How many unique NAF codes are present in the dataset? This number will define the number of output classes the model must predict.
+How many unique NACE codes are present in the dataset? This number will define the number of output classes the model must predict.
 
 <details>
 <summary>Clue here</summary>
@@ -156,7 +163,7 @@ The `.n_unique()` method in Polars may help you computing the number of classes.
 #| code-overflow: scroll
 #| output: true
 n_classes = df['code'].n_unique()
-print(f"Number of unique NAF codes: {n_classes}")
+print(f"Number of unique NACE codes: {n_classes}")
 ```
 
 :::
@@ -200,9 +207,9 @@ from sklearn.model_selection import train_test_split
 train_df, tmp_df = train_test_split(df, test_size=0.30, random_state=42)
 val_df, test_df  = train_test_split(tmp_df, test_size=0.50, random_state=42)
 
-X_train = train_df["label"].to_numpy()
-X_val   = val_df["label"].to_numpy()
-X_test  = test_df["label"].to_numpy()
+X_train, y_train = train_df["label"].to_numpy(), train_df["code"].to_numpy()
+X_val, y_val = val_df["label"].to_numpy(), val_df["code"].to_numpy()
+X_test, y_test = test_df["label"].to_numpy(), test_df["code"].to_numpy()
 
 print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
 ```
@@ -215,12 +222,28 @@ We use `LabelEncoder` to map the categorical target `y` to integers `0, 1, …, 
 
 :::
 
-The `code` column contains strings like `"47.11A"`. Neural networks do not understand strings and require integer targets (1, 2, 3...), so we need to map each unique NAF code to an integer index. Encode the `code` column of each split using `LabelEncoder` from `sklearn.preprocessing`, and keep the fitted encoder — you will need it later to convert integer predictions back to NAF code strings.
+The `code` column contains strings like `"47.11A"`. Neural networks do not understand strings and require integer targets (1, 2, 3...), so we need to map each unique NACE code to an integer index. 
+
+``torchTextClassifiers`` provides the ``ValueEncoder`` object to deal with textual labels. You simply need to fit a [``LabelEncoder`` object](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.LabelEncoder.html) from the scikit-learn library to then build a ``ValueEncoder``.
 
 ::: {.callout-warning collapse="false"}
-## Watch out for unseen categories!
-Always fit the `LabelEncoder` on **all** codes present in the data, not just codes present in the training set. Why that? Imagine that one code is very rare and is present only in the validation set or in the test. If the `LabelEncoder` is trained on the training set alone, it will not be able to map this rare code to an integer, and when you apply the `LabelEncoder` to this code (for instance when evaluating the model) you will get an error.
+## Make sure all labels appear in the training set!
+Fit the `LabelEncoder` on the **training set only** — fitting on validation or test data would be data leakage. However, this means any NACE code absent from the training set will cause an error at inference time. **Make sure every code appears at least once in training before splitting.**
 :::
+
+```{python}
+#| label: check-labels
+#| output: true
+all_codes  = set(df['code'])
+train_codes = set(train_df['code'])
+missing = all_codes - train_codes
+
+if missing:
+    print(f"WARNING: {len(missing)} code(s) missing from training set: {missing}")
+else:
+    print(f"OK — all {len(all_codes)} codes appear in the training set.")
+```
+
 
 ```{python}
 #| label: split-data
@@ -231,15 +254,13 @@ Always fit the `LabelEncoder` on **all** codes present in the data, not just cod
 from sklearn.preprocessing import LabelEncoder
 
 encoder = LabelEncoder()
-encoder.fit(df['code'].to_numpy())
+encoder.fit(train_df['code'].to_numpy())
 
-y_train = encoder.transform(train_df['code'].to_numpy())
-y_val   = encoder.transform(val_df['code'].to_numpy())
-y_test  = encoder.transform(test_df['code'].to_numpy())
 
-print(f"Train: {len(train)} | Val: {len(val)} | Test: {len(test)}")
-print(f"Example: '{train['label'][0]}' → {encoder.inverse_transform(y_train[:1])[0]}")
+value_encoder = ValueEncoder(label_encoder=encoder)
 ```
+
+
 
 :::
 
@@ -310,7 +331,7 @@ is supposed to predict blind.
 #| output: true
 from torchTextClassifiers.tokenizers import WordPieceTokenizer
 
-tokenizer = WordPieceTokenizer(vocab_size=5000, output_dim=125)
+tokenizer = WordPieceTokenizer(vocab_size=5000, output_dim=10)
 tokenizer.train(X_train)
 
 print("Output tensor size:", tokenizer.tokenize(X_train[0]).input_ids.shape)
@@ -355,20 +376,20 @@ Key training hyperparameters:
 ::: {.callout-tip collapse="false" icon=false}
 ## `<i class="bi bi-book"></i>`{=html} Exercice 4: Train the model
 
-`torchTextClassifiers` provides a high-level wrapper that combines the tokenizer, model
+`torchTextClassifiers` provides a high-level wrapper that combines the value encoder, tokenizer, model
 components, and training loop.
 
 ## Question 1 — Instantiate the classifier
 
 Instantiate the classifier from a `ModelConfig` and the trained tokenizer.
 
-*Build an `AttentionConfig`, then a `ModelConfig` with `embedding_dim`, `num_classes`, and a `LabelAttentionConfig`. Pass both to `torchTextClassifiers(tokenizer=..., model_config=...)`.*
+*Build a  `ModelConfig` with `embedding_dim`, `num_classes`, and `n_heads_label_attention=4`. Pass both to `torchTextClassifiers(tokenizer=..., model_config=..., value_encoder=...)`.*
 
 ::: {.callout-note appearance="simple" collapse="true"}
 ## Key parameters
 - `embedding_dim=96`: size of the dense vector representing each token. Larger values capture more information but are slower to train.
-- `n_layers=1`, `n_head=4`: the self-attention has 1 transformer layer with 4 parallel attention heads. More heads can capture richer patterns but increase computation.
-- `sequence_len=tokenizer.output_dim`: must match the tokenizer's `output_dim` so that all token sequences have the same length.
+- about the label attention mechanism, we refer to the [documentation](https://inseefrlab.github.io/torchTextClassifiers/architecture/overview.html#with-label-attention-optional-explainability-layer). Just remember that it is an explainability tool that will be useful later.
+
 :::
 ```{python}
 #| label: model-config
@@ -380,35 +401,32 @@ from torchTextClassifiers import ModelConfig, TrainingConfig, torchTextClassifie
 from torchTextClassifiers.model.components import AttentionConfig
 from torchTextClassifiers.model.components.text_embedder import LabelAttentionConfig
 
-attention_config = AttentionConfig(
-    n_layers=1, n_head=4, n_kv_head=4,
-    sequence_len=tokenizer.output_dim,
-)
-
 embedding_dim = 96
 
 model_config = ModelConfig(
     embedding_dim=embedding_dim,
     num_classes=n_classes,
-    attention_config=attention_config,
-    label_attention_config=LabelAttentionConfig(n_head=4, num_classes=n_classes),
-)
+    n_heads_label_attention=4,
+    aggregation_method=None)
 
-ttc = torchTextClassifiers(tokenizer=tokenizer, model_config=model_config)
+ttc = torchTextClassifiers(
+    tokenizer=tokenizer,
+    model_config=model_config,
+    value_encoder=value_encoder,
+)
 ```
 
 ## Question 2 — Train on a small subsample
 
 Define a `TrainingConfig` and train on a small subsample so it completes quickly.
 
-*Create a `TrainingConfig(lr=..., batch_size=..., num_epochs=..., num_workers=...)` and call `ttc.train(X_train=..., y_train=..., X_val=..., y_val=..., training_config=..., verbose=True)`.*
+*Create a `TrainingConfig(lr=..., batch_size=..., num_epochs=...)` and call `ttc.train(X_train=..., y_train=..., X_val=..., y_val=..., training_config=..., verbose=True)`.*
 
 You can see the `TrainingConfig` documentation [here](https://inseefrlab.github.io/torchTextClassifiers/api/configs.html#trainingconfig)
 
 ::: {.callout-note appearance="simple" collapse="true"}
 ## Note
-We train on a **small subsample** (5% of the data, 1 epoch) just to verify the pipeline runs
-end-to-end — the model will not converge to a good accuracy in one epoch on 5% of the data.
+We only perform a quick training (1 epoch) just to verify the pipeline runs end-to-end.
 A model trained on the full dataset for many epochs is loaded from MLflow in the next step.
 
 Key hyperparameters used here:
@@ -416,7 +434,26 @@ Key hyperparameters used here:
 - `lr=1e-3`: a standard starting learning rate for Adam-based optimizers.
 - `batch_size=256`: how many examples are processed before each weight update — larger batches are faster but require more memory.
 - `num_epochs=1`: one pass over the data, kept short for this demo.
-- `num_workers=0`: disables parallel data loading (use `>0` to speed up on multi-core machines).
+:::
+
+::: {.callout-tip appearance="simple" collapse="true"}
+## Tip — Logging training with MLflow
+
+Pass an `MLFlowLogger` instance to `TrainingConfig` via `trainer_params` to automatically log metrics (loss, accuracy) to an MLflow experiment:
+
+```python
+from pytorch_lightning.loggers import MLFlowLogger
+
+mlflow_logger = MLFlowLogger(experiment_name="my-experiment")
+training_config = TrainingConfig(
+    ...,
+    trainer_params={"logger": mlflow_logger}
+)
+```
+
+- `experiment_name`: the MLflow experiment that will group your runs. It is created automatically if it does not exist.
+- Each call to `ttc.train(...)` creates a new *run* inside that experiment, so successive training attempts are kept separate and comparable.
+- If `MLFLOW_TRACKING_URI` is set in your environment (e.g. via `.env`), `MLFlowLogger` will forward metrics to that remote server automatically.
 :::
 
 ```{python}
@@ -425,27 +462,28 @@ Key hyperparameters used here:
 #| code-summary: Click to see the answer
 #| code-overflow: scroll
 #| output: true
-TRAIN_FRAC = 0.05
-VAL_FRAC = 0.05
 
-X_train_small = X_train[:int(len(X_train) * TRAIN_FRAC)]
-y_train_small = y_train[:int(len(y_train) * TRAIN_FRAC)]
-X_val_small   = X_val[:int(len(X_val) * VAL_FRAC)]
-y_val_small   = y_val[:int(len(y_val) * VAL_FRAC)]
+from pytorch_lightning.loggers import MLFlowLogger
+
+mlflow_logger = MLFlowLogger(
+        experiment_name="funathon-project-nlp",
+    )
 
 training_config = TrainingConfig(
-    lr=1e-3,
-    batch_size=256,
     num_epochs=1,
-    num_workers=0,
+    batch_size=256,
+    lr=1e-3,
+    patience_early_stopping=5,
+    trainer_params={"logger": mlflow_logger}
 )
 
+# This should take approximately 2-3mn
 ttc.train(
-    X_train=X_train_small,
-    y_train=y_train_small,
-    X_val=X_val_small,
-    y_val=y_val_small,
+    X_train,
+    y_train,
     training_config=training_config,
+    X_val=X_val,
+    y_val=y_val,
     verbose=True,
 )
 ```
@@ -491,7 +529,7 @@ with open(os.path.join(artifacts_path, "model_config.json")) as f:
     saved_config = json.load(f)
 
 with open(os.path.join(artifacts_path, "label_mapping.json")) as f:
-    saved_label_mapping = json.load(f)  # {str(int): NAF code}
+    saved_label_mapping = json.load(f)  # {str(int): NACE code}
 
 loaded_tokenizer = WordPieceTokenizer(
     vocab_size=saved_config["vocab_size"],
@@ -528,7 +566,7 @@ ttc_full.pytorch_model.eval()
 
 # Prediction and explainability
 
-Once the model is trained, we can use it to predict NAF codes for new text descriptions.
+Once the model is trained, we can use it to predict NACE codes for new text descriptions.
 `torchTextClassifiers` supports **label attention explainability**: the model's internal attention
 matrix links each predicted class to the tokens that contributed most to it, showing which
 words drove the prediction.
@@ -543,7 +581,7 @@ Attention weights highlight which tokens the model focused on when predicting a 
 
 ## Question 1 — Generate top-3 predictions with confidence scores
 
-Call `ttc_full.predict(np.array(example_texts), top_k=3, explain_with_label_attention=True)`. The result is a dict with keys `prediction` and `confidence` — decode integer predictions back to NAF codes using `saved_label_mapping[str(idx)]`.
+Call `ttc_full.predict(np.array(example_texts), top_k=3, explain_with_label_attention=True)`. The result is a dict with keys `prediction` and `confidence` — decode integer predictions back to NACE codes using `saved_label_mapping[str(idx)]`.
 
 ```{python}
 #| label: predict-examples
@@ -610,7 +648,7 @@ words, word_attributions = map_attributions_to_word(
 )
 char_attributions = map_attributions_to_char(attributions.unsqueeze(0), offsets, text_sample)
 
-titles = [f"Attributions for NAF code {predicted_code}"]
+titles = [f"Attributions for NACE code {predicted_code}"]
 
 figshow(plot_attributions_at_char(
     text=text_sample, attributions_per_char=char_attributions, titles=titles,
@@ -646,7 +684,7 @@ print(f"Test accuracy: {accuracy:.4f} ({int(accuracy * len(y_test_small))}/{len(
 <summary>Clue here</summary>
 `predict()` returns a dictionary with `prediction` (shape `(N, top_k)`) and `confidence`
 (shape `(N, top_k)`). Use `saved_label_mapping[str(idx)]` to decode integer predictions back
-to NAF code strings. Words highlighted in red contributed positively to the prediction; those
+to NACE code strings. Words highlighted in red contributed positively to the prediction; those
 in blue pulled the model away from it.
 </details>
 

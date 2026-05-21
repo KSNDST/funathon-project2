@@ -1,11 +1,12 @@
 # %%
-
-import s3fs
-import os
-from dotenv import load_dotenv
 import polars as pl
-from tokenizers import Tokenizer
+from dotenv import load_dotenv
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 from torchTextClassifiers.tokenizers import WordPieceTokenizer
+from torchTextClassifiers import ModelConfig, TrainingConfig, torchTextClassifiers
+from torchTextClassifiers.value_encoder import ValueEncoder
+from pytorch_lightning.loggers import MLFlowLogger
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,92 +14,95 @@ logger = logging.getLogger(__name__)
 load_dotenv(override=True)
 
 # %%
-OUTPUT_PATH = "projet-ape/synthetic_data_test/naive/NAF2025_FR/"
-FILE_NAME = "generation_gpt-oss-120b_temp14_French_fewshot6_exhaustive.parquet"
-
-fs = s3fs.S3FileSystem(
-    client_kwargs={'endpoint_url': 'https://'+'minio.lab.sspcloud.fr'},
-    key=os.environ["AWS_ACCESS_KEY_ID"],
-    secret=os.environ["AWS_SECRET_ACCESS_KEY"],
-    token=os.environ["AWS_SESSION_TOKEN"]
-)
 
 
-with fs.open(os.path.join(OUTPUT_PATH, FILE_NAME), 'rb') as f:
-    df = pl.read_parquet(f)
+df = pl.read_parquet("https://minio.lab.sspcloud.fr/projet-formation/diffusion/funathon/2026/project2/generation_None_temp08.parquet")
 
 print(df.head())
-print(len(df))
+print(f"Total rows: {len(df)}")
 
 
 # %%
-n_classes = df['code'].n_unique()
+n_classes = df["code"].n_unique()
 print(n_classes)
 
-# %%
-def train_val_test_split(
-    df: pl.DataFrame,
-    train_frac: float = 0.7,
-    val_frac: float = 0.15,
-    seed: int = 42,
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    # Mélange aléatoire
-    df = df.sample(fraction=1.0, shuffle=True, seed=seed)
-
-    n = len(df)
-    n_train = int(n * train_frac)
-    n_val = int(n * val_frac)
-
-    train = df[:n_train]
-    val   = df[n_train : n_train + n_val]
-    test  = df[n_train + n_val :]
-
-    return train, val, test
-
-
-train, val, test = train_val_test_split(df)
-
-X_train, y_train = train['label'], train['code']
-X_val, y_val = val['label'], val['code']
-X_test, y_test = test['label'], test['code']
 
 # %%
-tokenizer = WordPieceTokenizer(vocab_size=5000, output_dim=128)
-training_corpus = train['label'].to_list()
-tokenizer.train(training_corpus)
+
+train_df, tmp_df = train_test_split(df, test_size=0.30, random_state=42)
+val_df, test_df  = train_test_split(tmp_df, test_size=0.50, random_state=42)
+
+X_train, y_train = train_df["label"].to_numpy(), train_df["code"].to_numpy()
+X_val, y_val = val_df["label"].to_numpy(), val_df["code"].to_numpy()
+X_test, y_test = test_df["label"].to_numpy(), test_df["code"].to_numpy()
+
+print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+
+
+#%%
+all_codes  = set(df['code'])
+train_codes = set(train_df['code'])
+missing = all_codes - train_codes
+
+if missing:
+    print(f"WARNING: {len(missing)} code(s) missing from training set: {missing}")
+else:
+    print(f"OK — all {len(all_codes)} codes appear in the training set.")
+
+#%%
+encoder = LabelEncoder()
+encoder.fit(train_df['code'].to_numpy())
+
+value_encoder = ValueEncoder(label_encoder=encoder)
+#%%
 
 # %%
+tokenizer = WordPieceTokenizer(vocab_size=5000, output_dim=10)
+tokenizer.train(X_train)
+
+print("Output tensor size:", tokenizer.tokenize(X_train[0]).input_ids.shape)
+print("Tokens:", tokenizer.tokenizer.convert_ids_to_tokens(
+    tokenizer.tokenize(X_train[0]).input_ids.squeeze(0)
+))
+print("Vocabulary size:", tokenizer.vocab_size)
+
+# %%
+embedding_dim = 96
+
 model_config = ModelConfig(
-    embedding_dim=50,
-    num_classes=n_classes
-)
+    embedding_dim=embedding_dim,
+    num_classes=n_classes,
+    n_heads_label_attention=4,
+    aggregation_method=None)
 
-classifier = torchTextClassifiers(
+ttc = torchTextClassifiers(
     tokenizer=tokenizer,
-    model_config=model_config
+    model_config=model_config,
+    value_encoder=value_encoder,
 )
-
 # %%
+
+mlflow_logger = MLFlowLogger(
+        experiment_name="funathon-project-nlp",
+        log_model=True,
+        synchronous=False,
+    )
 
 training_config = TrainingConfig(
-    num_epochs=20,
-    batch_size=4,
+    num_epochs=1,
+    batch_size=256,
     lr=1e-3,
     patience_early_stopping=5,
-    num_workers=0,  # Use 0 for simple examples to avoid multiprocessing issues
+    trainer_params={"logger": mlflow_logger}
 )
 
-classifier.train(
-    X_train, y_train, 
+# This should take approximately 2-3mn
+ttc.train(
+    X_train,
+    y_train,
     training_config=training_config,
-    X_val=X_val, y_val=y_val,
-    verbose=True
+    X_val=X_val,
+    y_val=y_val,
+    verbose=True,
 )
-
-result = classifier.predict(X_test)
-predictions = result["prediction"].squeeze().numpy()  # Extract predictions from dictionary
-confidence = result["confidence"].squeeze().numpy()  # Extract confidence scores
-logger.info(f"Predictions: {predictions}")
-logger.info(f"Confidence: {confidence}")
-logger.info(f"True labels: {y_test}")
 # %%

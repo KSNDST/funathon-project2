@@ -219,22 +219,31 @@ print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
 
 ## Question 2 — Encode the labels
 
+The `code` column contains strings like `"47.11A"` (codes from the NACE classification). Neural networks do not understand strings and require integer targets (1, 2, 3...), so we need to map each unique NACE code to an integer index. To do that, you will use an encoder.
+
 Use `LabelEncoder` from `sklearn.preprocessing` (see [here](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.LabelEncoder.html) for the documentation). Call `.fit()` on all codes, then `.transform()` on each split. Extract numpy arrays with `.to_numpy()`.
 
 ::: {.callout-note appearance="simple" collapse="true"}
 ## Why do we use LabelEncoder ?
 We use `LabelEncoder` to map the categorical target `y` to integers `0, 1, …, n_classes - 1`, the format expected by scikit-learn classifiers. It should not be used on input features, however: for those, `OrdinalEncoder` or `OneHotEncoder` is preferred, because `LabelEncoder` is designed for a 1D target and does not handle unseen categories at inference time.
-
 :::
-
-The `code` column contains strings like `"47.11A"`. Neural networks do not understand strings and require integer targets (1, 2, 3...), so we need to map each unique NACE code to an integer index. 
-
-``torchTextClassifiers`` provides the ``ValueEncoder`` object to deal with textual labels. You simply need to fit a [``LabelEncoder`` object](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.LabelEncoder.html) from the scikit-learn library to then build a ``ValueEncoder``.
 
 ::: {.callout-warning collapse="false"}
 ## Make sure all labels appear in the training set!
 Fit the `LabelEncoder` on the **training set only** — fitting on validation or test data would be data leakage. However, this means any NACE code absent from the training set will cause an error at inference time. **Make sure every code appears at least once in training before splitting.**
 :::
+
+```{python}
+#| label: split-data
+#| code-fold: true
+#| code-summary: Click to see the answer
+#| code-overflow: scroll
+#| output: true
+from sklearn.preprocessing import LabelEncoder
+
+encoder = LabelEncoder()
+encoder.fit(train_df['code'].to_numpy())
+```
 
 ```{python}
 #| label: check-labels
@@ -252,6 +261,11 @@ else:
     print(f"OK — all {len(all_codes)} codes appear in the training set.")
 ```
 
+## Question 3 — Prepare the labels to use them wityh `ttc`
+
+``torchTextClassifiers`` provides the ``ValueEncoder`` object to deal with textual labels. You simply need to feed the fitted `LabelEncoder` to the ``ValueEncoder``.
+
+Create a `ValueEncoder` ..... TO BE COMLETED BY MEILAME
 
 ```{python}
 #| label: split-data
@@ -259,16 +273,10 @@ else:
 #| code-summary: Click to see the answer
 #| code-overflow: scroll
 #| output: true
-from sklearn.preprocessing import LabelEncoder
 from torchTextClassifiers.value_encoder import ValueEncoder
-
-encoder = LabelEncoder()
-encoder.fit(train_df['code'].to_numpy())
 
 value_encoder = ValueEncoder(label_encoder=encoder)
 ```
-
-
 
 :::
 

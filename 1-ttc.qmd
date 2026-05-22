@@ -438,26 +438,48 @@ ttc = torchTextClassifiers(
 )
 ```
 
-## Question 2 — Train on a small subsample
+## Question 2 — Prepare training
 
-Define a `TrainingConfig` and train on a small subsample so it completes quickly. You can see the `TrainingConfig` documentation [here](https://inseefrlab.github.io/torchTextClassifiers/api/configs.html#trainingconfig)
+Define a `TrainingConfig` and train on a small subsample so it completes quickly. __Use only 1 epoch for fast training__. A model trained on the full dataset for many epochs is loaded from MLflow in the next step. Have a careful look at the hyperparameters. Do you understand what they do?
+
+You can see the `TrainingConfig` documentation [here](https://inseefrlab.github.io/torchTextClassifiers/api/configs.html#trainingconfig).
 
 <details>
 <summary>Clue here</summary>
-Create a `TrainingConfig(lr=..., batch_size=..., num_epochs=...)` and call `ttc.train(X_train=..., y_train=..., X_val=..., y_val=..., training_config=..., verbose=True)`.
+Create a `TrainingConfig(lr=..., batch_size=..., num_epochs=...)`.
 </details>
 
 ::: {.callout-note appearance="simple" collapse="true"}
-## Note
-We only perform a quick training (1 epoch) just to verify the pipeline runs end-to-end.
-A model trained on the full dataset for many epochs is loaded from MLflow in the next step.
-
+## Want to learn what hyperparameters do? 
 Key hyperparameters used here:
 
 - `lr=5e-4`: a standard starting learning rate for Adam-based optimizers.
 - `batch_size=128`: how many examples are processed before each weight update — larger batches are faster but require more memory.
 - `num_epochs=1`: one pass over the data, kept short for this demo.
 :::
+
+```{python}
+#| label: train-small
+#| code-fold: true
+#| code-summary: Click to see the answer
+#| code-overflow: scroll
+#| output: true
+training_config = TrainingConfig(
+    num_epochs=1,
+    batch_size=128,
+    lr=5*1e-4,
+    patience_early_stopping=5,
+)
+```
+
+## Question 3 — Train on a small subsample
+
+Train the model using the `TrainingConfig` defined before. Look carefully at the arguments of the `train` method. You can try to use MLflow or automatic model logging, but this is optional (see below).
+
+<details>
+<summary>Clue here</summary>
+Call `ttc.train(X_train=..., y_train=..., X_val=..., y_val=..., training_config=..., verbose=True)`.
+</details>
 
 ::: {.callout-tip appearance="simple" collapse="true"}
 ## Tip — Logging training with MLflow
@@ -486,13 +508,6 @@ with mlflow.start_run():
 
 mlflow.set_experiment("funathon-2026-project2")
 mlflow.pytorch.autolog()
-
-training_config = TrainingConfig(
-    num_epochs=1,
-    batch_size=128,
-    lr=5*1e-4,
-    patience_early_stopping=5,
-)
 
 with mlflow.start_run() as run:
     # This should take approximately 1-2mn
